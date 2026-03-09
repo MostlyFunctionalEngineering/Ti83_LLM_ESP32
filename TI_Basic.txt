@@ -1,0 +1,5 @@
+ClrHome
+Input "QUERY:",Str1
+Send(Str1)
+Get(Str2)
+Disp Str2
