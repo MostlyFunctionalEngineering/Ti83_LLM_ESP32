@@ -8,8 +8,13 @@
 #define TI_TIP 4
 #define TI_RING 5
 
+#define ANALOG_WAKE_PIN 2
+#define ANALOG_THRESHOLD 1240
+
 #define WIFI_RESET_PIN 9
 #define DEVICE_HOSTNAME "TI-83 Plus"
+
+#define SLEEP_SECONDS 60
 
 #define DEBUG 1
 
@@ -25,6 +30,8 @@ Preferences prefs;
 String apiKey;
 WiFiManager wm;
 
+bool wifiInitialized = false;
+
 // -----------------------------
 // TI Link helpers
 // -----------------------------
@@ -39,13 +46,17 @@ inline bool ringRead() { return digitalRead(TI_RING); }
 
 void tiIdle() { tipRelease(); ringRelease(); }
 
-// Wait helper to prevent deadlock
+// -----------------------------
 bool waitWhile(bool (*cond)(), uint32_t timeoutMicros = 200000) {
     uint32_t start = micros();
+
     while (cond()) {
         if (micros() - start > timeoutMicros)
             return false;
+
+        delayMicroseconds(10);
     }
+
     return true;
 }
 
@@ -82,6 +93,7 @@ bool tiReceiveBit(bool &bit) {
         tipRelease();
         bit = false;
     }
+
     return true;
 }
 
@@ -94,25 +106,34 @@ void tiSendByte(uint8_t value) {
 
 bool tiReceiveByte(uint8_t &value) {
     value = 0;
+
     for (int i = 0; i < 8; i++) {
         bool bit;
         if (!tiReceiveBit(bit)) return false;
         if (bit) value |= (1 << i);
     }
+
     return true;
 }
 
 // -----------------------------
 String tiReceiveString() {
     uint8_t len;
-    if (!tiReceiveByte(len)) return "";
+
+    if (!tiReceiveByte(len))
+        return "";
 
     String s = "";
+
     for (uint8_t i = 0; i < len; i++) {
         uint8_t b;
-        if (!tiReceiveByte(b)) return s;
+
+        if (!tiReceiveByte(b))
+            return s;
+
         s += (char)b;
     }
+
     return s;
 }
 
@@ -121,99 +142,113 @@ void tiSendString(const String &s) {
     if (len > 255) len = 255;
 
     tiSendByte(len);
+
     for (uint8_t i = 0; i < len; i++)
         tiSendByte(s[i]);
 }
 
 // -----------------------------
-// Embedded TI Program (with menu suboptions)
+// Embedded TI Program
 // -----------------------------
 const uint8_t gptProgram[] = {
-    0xBB, 0x5D, 0x2A, 0x54, 0x49, 0x20, 0x47, 0x50, 0x54, 0x2A,
-    0xBB, 0x5D, 0x2A, 0x41, 0x53, 0x4B, 0x2A, 0x2C, 0xAA,
-    0xBB, 0xEF, 0xAA,
-    0xBB, 0xE7, 0xAB,
-    0xBB, 0x5D, 0xAB,
-    0xBB, 0x6E, 0x32
+    0xBB,0x5D,0x2A,0x54,0x49,0x20,0x47,0x50,0x54,0x2A,
+    0xBB,0x5D,0x2A,0x41,0x53,0x4B,0x2A,0x2C,0xAA,
+    0xBB,0xEF,0xAA,
+    0xBB,0xE7,0xAB,
+    0xBB,0x5D,0xAB,
+    0xBB,0x6E,0x32
 };
+
 const int gptProgramSize = sizeof(gptProgram);
 
 void sendTIProgram() {
-    const char name[8] = { 'G','P','T',0,0,0,0,0 };
 
-    DBG("Sending program with menu...");
+    const char name[8] = {'G','P','T',0,0,0,0,0};
 
-    tiSendByte(0x06);  // VAR packet
-    tiSendByte(0x05);  // program type
+    DBG("Sending program");
 
-    for (int i = 0; i < 8; i++)
+    tiSendByte(0x06);
+    tiSendByte(0x05);
+
+    for(int i=0;i<8;i++)
         tiSendByte(name[i]);
 
     tiSendByte(gptProgramSize & 0xFF);
     tiSendByte(gptProgramSize >> 8);
 
-    for (int i = 0; i < gptProgramSize; i++)
+    for(int i=0;i<gptProgramSize;i++)
         tiSendByte(gptProgram[i]);
 
-    String menu = "!install:Menu->Ask GPT, !wifi reset, !portal";
-    tiSendString(menu);
+    tiSendString("!install");
 
-    DBG("Program transfer complete with menu");
+    DBG("Program sent");
 }
 
 // -----------------------------
 // ChatGPT request
 // -----------------------------
 String queryChatGPT(String prompt) {
-    DBG("Sending OpenAI request");
+
+    DBG("OpenAI request");
 
     WiFiClientSecure client;
     client.setInsecure();
+
     HTTPClient https;
 
-    https.begin(client, "https://api.openai.com/v1/chat/completions");
-    https.addHeader("Content-Type", "application/json");
-    https.addHeader("Authorization", "Bearer " + apiKey);
+    https.begin(client,"https://api.openai.com/v1/chat/completions");
+
+    https.addHeader("Content-Type","application/json");
+    https.addHeader("Authorization","Bearer "+apiKey);
 
     StaticJsonDocument<1024> request;
-    request["model"] = "gpt-4o-mini";
-    request["max_tokens"] = 60;
 
-    JsonArray messages = request.createNestedArray("messages");
-    JsonObject sys = messages.createNestedObject();
-    sys["role"] = "system";
-    sys["content"] = "Reply as short as possible.";
+    request["model"]="gpt-4o-mini";
+    request["max_tokens"]=60;
 
-    JsonObject msg = messages.createNestedObject();
-    msg["role"] = "user";
-    msg["content"] = prompt;
+    JsonArray messages=request.createNestedArray("messages");
+
+    JsonObject sys=messages.createNestedObject();
+    sys["role"]="system";
+    sys["content"]="Reply as short as possible.";
+
+    JsonObject msg=messages.createNestedObject();
+    msg["role"]="user";
+    msg["content"]=prompt;
 
     String body;
-    serializeJson(request, body);
+    serializeJson(request,body);
 
-    int httpCode = https.POST(body);
-    if (httpCode != 200) {
-        DBG("OpenAI HTTP error");
+    int httpCode=https.POST(body);
+
+    if(httpCode!=200){
+        DBG("OpenAI error");
         https.end();
         return "HTTP error";
     }
 
-    String response = https.getString();
-    StaticJsonDocument<4096> doc;
-    deserializeJson(doc, response);
+    String response=https.getString();
 
-    String reply = doc["choices"][0]["message"]["content"].as<String>();
+    StaticJsonDocument<4096> doc;
+    deserializeJson(doc,response);
+
+    String reply=doc["choices"][0]["message"]["content"].as<String>();
+
     https.end();
 
-    if (reply.length() > 255) reply = reply.substring(0, 255);
+    if(reply.length()>255)
+        reply=reply.substring(0,255);
 
     return reply;
 }
 
 // -----------------------------
-// WiFi Setup
+// WiFi
 // -----------------------------
-void setupWifi() {
+void setupWifi(){
+
+    if(wifiInitialized) return;
+
     DBG("Initializing WiFi");
 
     WiFi.mode(WIFI_STA);
@@ -221,63 +256,70 @@ void setupWifi() {
 
     wm.setDebugOutput(DEBUG);
 
-    prefs.begin("config", false);
-    String savedApi = prefs.getString("apikey", "");
-    WiFiManagerParameter apiParam("apikey", "OpenAI API Key", savedApi.c_str(), 80);
+    prefs.begin("config",false);
+
+    String savedApi=prefs.getString("apikey","");
+
+    WiFiManagerParameter apiParam("apikey","OpenAI API Key",savedApi.c_str(),80);
+
     wm.addParameter(&apiParam);
 
-    // Only autoConnect if credentials exist
-    bool hasCreds = WiFi.SSID() != "" || WiFi.status() == WL_CONNECTED;
-    bool res;
-
-    if (prefs.getString("ssid", "").length() > 0) {
-        res = wm.autoConnect("TI83-Plus");
-    } else {
-        DBG("No WiFi creds, starting AP portal");
-        res = wm.startConfigPortal("TI83-Plus");
-    }
-
-    if (!res) {
+    if(!wm.autoConnect("TI83-Plus")){
         DBG("WiFi failed");
         ESP.restart();
     }
 
-    apiKey = String(apiParam.getValue());
-    prefs.putString("apikey", apiKey);
+    apiKey=String(apiParam.getValue());
+
+    prefs.putString("apikey",apiKey);
     prefs.end();
 
+    wifiInitialized=true;
+
     DBG("WiFi connected");
-    DBGF("SSID: %s\n", WiFi.SSID().c_str());
-    DBGF("IP: %s\n", WiFi.localIP().toString().c_str());
 }
 
 // -----------------------------
-// WiFi utilities
-// -----------------------------
-void resetWifi() {
-    DBG("Resetting WiFi settings");
-    wm.resetSettings();
-    delay(2000);
-    ESP.restart();
+void goToSleep(){
+
+    DBG("Entering deep sleep");
+
+    esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_SECONDS * 1000000ULL);
+
+    Serial.flush();
+
+    esp_deep_sleep_start();
 }
 
-void startWifiPortal() {
-    DBG("Starting config portal");
-    wm.startConfigPortal("TI83-GPT");
-    DBG("Portal closed");
+// -----------------------------
+bool analogTriggerActive(){
+
+    int reading = analogRead(ANALOG_WAKE_PIN);
+
+    DBGF("ADC reading: %d\n",reading);
+
+    return reading > ANALOG_THRESHOLD;
 }
 
 // -----------------------------
 // Setup
 // -----------------------------
-void setup() {
-    Serial.begin(115200);
-    delay(500); // allow serial to initialize
-    pinMode(WIFI_RESET_PIN, INPUT_PULLUP);
+void setup(){
 
-    // Make TI lines idle, but non-blocking
+    Serial.begin(115200);
+    delay(3000);
+
+    Serial.println("Serial Beginning");
+
+    pinMode(WIFI_RESET_PIN,INPUT_PULLUP);
+
     tipRelease();
     ringRelease();
+
+    analogReadResolution(12);
+    pinMode(ANALOG_WAKE_PIN,INPUT);
+
+    DBG("Analog trigger active");
 
     setupWifi();
 }
@@ -286,33 +328,56 @@ void setup() {
 // Loop
 // -----------------------------
 void loop() {
+
+    // Handle WiFi reset button
     if (digitalRead(WIFI_RESET_PIN) == LOW) {
-        DBG("WiFi reset button held");
+        DBG("WiFi reset");
         delay(3000);
-        if (digitalRead(WIFI_RESET_PIN) == LOW)
-            resetWifi();
+        if (digitalRead(WIFI_RESET_PIN) == LOW) {
+            wm.resetSettings();
+            ESP.restart();
+        }
     }
 
-    if (tipRead() == LOW || ringRead() == LOW) {
-        DBG("TI connected, waiting for query...");
-        String query = tiReceiveString();
-        DBGF("Received: %s\n", query.c_str());
+    const int ANALOG_OFF_CYCLES = 20; // number of consecutive low readings to sleep
+    int analogLowCount = 0;
 
-        if (query.startsWith("!install")) {
-            sendTIProgram();
+    while (true) {
+        int analogVal = analogRead(ANALOG_WAKE_PIN);
+        DBGF("ADC reading: %d\n", analogVal);
 
-            if (query.indexOf("Ask GPT") >= 0) {
-                String prompt = query.substring(query.indexOf("Ask GPT") + 8);
-                String response = queryChatGPT(prompt);
-                tiSendString(response);
-            } else if (query.indexOf("wifi reset") >= 0) {
-                resetWifi();
-            } else if (query.indexOf("portal") >= 0) {
-                startWifiPortal();
+        // TI connected?
+        if (tipRead() == LOW || ringRead() == LOW) {
+            DBG("TI connected");
+            String query = tiReceiveString();
+            DBGF("Received: %s\n", query.c_str());
+            DBGF("Standard Serial: %s\n", Serial.printf("%02X ", query));
+            if (query.startsWith("MFE")) {
+                sendTIProgram();
+
+                if (query.indexOf("Ask GPT") >= 0) {
+                    String prompt = query.substring(query.indexOf("Ask GPT") + 8);
+                    String response = queryChatGPT(prompt);
+                    tiSendString(response);
+                }
             }
+            analogLowCount = 0; // reset counter if TI is active
         }
-    } else {
-        DBG("No TI connected, skipping receive");
-        delay(500);
+
+        // Analog line high → stay awake
+        if (analogVal > ANALOG_THRESHOLD) {
+            analogLowCount = 0;
+        } else {
+            analogLowCount++;
+        }
+
+        // If analog low for several cycles → go to deep sleep
+        if (analogLowCount >= ANALOG_OFF_CYCLES) {
+            DBG("Analog trigger low, entering deep sleep");
+            delay(10); // small delay to finish serial prints
+            goToSleep();
+        }
+
+        delay(200); // poll interval
     }
 }
