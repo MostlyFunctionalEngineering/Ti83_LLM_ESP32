@@ -8,6 +8,9 @@
 #define TI_TIP 4
 #define TI_RING 5
 
+#define ENABLE_DEEP_SLEEP 0
+
+
 #define ANALOG_WAKE_PIN 2
 #define ANALOG_THRESHOLD 1240
 
@@ -66,11 +69,13 @@ bool waitWhile(bool (*cond)(), uint32_t timeoutMicros = 200000) {
 bool tiSendBit(bool bit) {
     if (bit) {
         tipLow();
+        delayMicroseconds(8);
         if (!waitWhile(ringRead)) return false;
         tipRelease();
         if (!waitWhile([]() { return !ringRead(); })) return false;
     } else {
         ringLow();
+        delayMicroseconds(8);
         if (!waitWhile(tipRead)) return false;
         ringRelease();
         if (!waitWhile([]() { return !tipRead(); })) return false;
@@ -122,6 +127,11 @@ String tiReceiveString() {
 
     if (!tiReceiveByte(len))
         return "";
+
+    if (len > 200) {   // sanity limit
+        DBG("Invalid TI packet length");
+        return "";
+    }
 
     String s = "";
 
@@ -281,14 +291,14 @@ void setupWifi(){
 
 // -----------------------------
 void goToSleep(){
-
+#if ENABLE_DEEP_SLEEP
     DBG("Entering deep sleep");
-
     esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_SECONDS * 1000000ULL);
-
     Serial.flush();
-
     esp_deep_sleep_start();
+#else
+    DBG("Deep sleep disabled (debug mode)");
+#endif
 }
 
 // -----------------------------
@@ -349,9 +359,19 @@ void loop() {
         // TI connected?
         if (tipRead() == LOW || ringRead() == LOW) {
             DBG("TI connected");
+            DBG("Receiving TI packet...");
+
             String query = tiReceiveString();
-            DBGF("Received: %s\n", query.c_str());
-            DBGF("Standard Serial: %s\n", Serial.printf("%02X ", query));
+
+            DBGF("Received length: %d\n", query.length());
+            DBGF("Received text: %s\n", query.c_str());
+
+            DBG("Raw query bytes:");
+            for (size_t i = 0; i < query.length(); i++) {
+                Serial.printf("%02X ", (uint8_t)query[i]);
+            }
+            Serial.println();
+
             if (query.startsWith("MFE")) {
                 sendTIProgram();
 
