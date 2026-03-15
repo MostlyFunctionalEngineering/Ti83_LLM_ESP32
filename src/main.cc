@@ -119,8 +119,8 @@ void loop() {
         if (byteCount == 3) lenLo = data;
         if (byteCount == 4) {
             uint16_t dataLen = (uint16_t)lenLo | ((uint16_t)data << 8);
-            if (state == WAIT_ANNOUNCE) {
-                expectedBytes = 4; // announce is always 4 bytes
+            if (state == WAIT_ANNOUNCE || state == WAIT_EOT) {
+                expectedBytes = 4;
             } else {
                 expectedBytes = 4 + dataLen + (dataLen > 0 ? 2 : 0);
             }
@@ -163,7 +163,7 @@ void loop() {
                 case WAIT_EOT:
                     Serial.println("Got EOT, ACKing. Transfer complete!");
                     sendShortPacket(0x56);
-                    state = WAIT_ANNOUNCE; // reset for next transfer
+                    state = WAIT_ANNOUNCE;
                     break;
             }
         }
