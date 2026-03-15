@@ -371,7 +371,7 @@ void loop() {
     if (digitalRead(BOOT_PIN) == LOW) {
         delay(50);
         if (digitalRead(BOOT_PIN) == LOW) {
-            sendString("SUBSCRIBE", 1, false);
+            sendString("SUBSCRIBE", 0, false);
             while (digitalRead(BOOT_PIN) == LOW) delay(10);
         }
     }
