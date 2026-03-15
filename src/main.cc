@@ -132,7 +132,6 @@ uint8_t recvShortPacket() {
 }
 
 uint8_t recvShortPacketWait() {
-    // Wait up to 30 seconds for first byte (user is interacting with calc)
     uint32_t start = millis();
     while (digitalRead(TIP) && digitalRead(RING)) {
         if (millis() - start > 30000) {
@@ -151,74 +150,20 @@ uint8_t recvShortPacketWait() {
     return b1;
 }
 
-void sendVariable() {
-    Serial.println("\nSending variable to calculator...");
-    Serial.println("Put calc in receive mode: 2nd > LINK > RECEIVE, then press ENTER");
-    delay(5000);
-
-    const uint8_t varData[] = {
-    0x00, 0x83, 0x12, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00  // just the 9 float bytes
-    };
-    const uint16_t varDataSize = sizeof(varData);  // = 9
-
-    uint8_t header[13] = {
-        0x09, 0x00,
-        0x00,
-        'B', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00,
-        0x00
-    };
-
-    // Step 1: Send VAR header
-    Serial.println("Sending VAR header...");
-    sendPacket(0x06, header, 13);
-    delay(10);
-
-    // Step 2: Receive ACK
-    uint8_t cmd = recvShortPacket();
-    Serial.print("Step2 ACK: 0x"); Serial.println(cmd, HEX);
-    if (cmd != 0x56) { Serial.println("Expected ACK, aborting"); return; }
-
-    // Step 3: Receive CTS (calc may show overwrite screen here, wait for user)
-    cmd = recvShortPacketWait();
-    Serial.print("Step3 CTS: 0x"); Serial.println(cmd, HEX);
-    if (cmd != 0x09) { Serial.println("Expected CTS, aborting"); return; }
-
-    // Step 4: ACK the CTS
-    sendShortPacket(0x56);
-    delay(10);
-
-    // Step 5: Send DATA
-    Serial.println("Sending data...");
-    sendPacket(0x15, varData, varDataSize);
-    delay(10);
-
-    // Step 6: Receive ACK for data (wait — calc may be writing to memory)
-    cmd = recvShortPacketWait();
-    Serial.print("Step6 ACK: 0x"); Serial.println(cmd, HEX);
-    if (cmd != 0x56) { Serial.println("Expected ACK to data, aborting"); return; }
-
-    // Step 7: Send EOT
-    sendShortPacket(0x92);
-    delay(10);
-
-    // Step 8: Receive final ACK
-    cmd = recvShortPacketWait();
-    Serial.print("Step8 ACK: 0x"); Serial.println(cmd, HEX);
-
-    Serial.println("Done! Check your calculator.");
-}
-
-void sendString(const char *str, uint8_t strSlot) {
-    // strSlot: 0=Str0, 1=Str1, etc.
+void sendString(const char *str, uint8_t strSlot, bool autoMode = false) {
     Serial.println("\nSending string to calculator...");
-    Serial.println("Put calc in receive mode: 2nd > LINK > RECEIVE, then press ENTER");
-    delay(5000);
+
+    if (!autoMode) {
+        Serial.println("Put calc in receive mode: 2nd > LINK > RECEIVE, then press ENTER");
+        delay(5000);
+    } else {
+        Serial.println("Auto mode - sending immediately...");
+        delay(100);
+    }
 
     uint16_t strLen = strlen(str);
-    uint16_t dataSize = 2 + strLen;  // 2-byte length prefix + string bytes
+    uint16_t dataSize = 2 + strLen;
 
-    // Build data payload
     uint8_t payload[256];
     payload[0] = strLen & 0xFF;
     payload[1] = (strLen >> 8) & 0xFF;
@@ -226,13 +171,12 @@ void sendString(const char *str, uint8_t strSlot) {
         payload[2 + i] = str[i];
     }
 
-    // Build 13-byte header
     uint8_t header[13] = {0};
     header[0] = dataSize & 0xFF;
     header[1] = (dataSize >> 8) & 0xFF;
-    header[2] = 0x04;         // type: string
-    header[3] = 0xAA;         // name byte 1 (Str token)
-    header[4] = strSlot;      // name byte 2 (slot number)
+    header[2] = 0x04;
+    header[3] = 0xAA;
+    header[4] = strSlot;
 
     Serial.println("Sending VAR header...");
     sendPacket(0x06, header, 13);
@@ -273,28 +217,40 @@ void setup() {
     pinMode(RING, INPUT_PULLUP);
     pinMode(BOOT_PIN, INPUT_PULLUP);
     Serial.println("Ready.");
-    Serial.println("Press BOOT to send variable B=1234 to calculator.");
-    Serial.println("Or send a variable from calc to receive it here.");
+    Serial.println("Press BOOT to send string to calculator.");
+    Serial.println("Or run ESPREQ program on calculator.");
 }
 
 void loop() {
     static int byteCount = 0;
     static uint16_t expectedBytes = 4;
     static uint8_t lenLo = 0;
-    static enum { WAIT_ANNOUNCE, WAIT_VAR_HDR, WAIT_ACK_TO_CTS, WAIT_DATA, WAIT_EOT } state = WAIT_ANNOUNCE;
+    static enum {
+        WAIT_PACKET,    // waiting for any packet
+        WAIT_DATA,      // waiting for data after CTS exchange
+        WAIT_EOT        // waiting for EOT after data
+    } state = WAIT_PACKET;
 
     uint8_t data = getByte();
     if (!error_level) {
-        recvBuf[byteCount] = data;  // save to buffer
+        recvBuf[byteCount] = data;
         Serial.print("0x");
         if (data < 0x10) Serial.print("0");
         Serial.println(data, HEX);
-        byteCount++;    
+        byteCount++;
 
         if (byteCount == 3) lenLo = data;
         if (byteCount == 4) {
             uint16_t dataLen = (uint16_t)lenLo | ((uint16_t)data << 8);
-            if (state == WAIT_ANNOUNCE || state == WAIT_EOT) {
+            if (state == WAIT_EOT) {
+                expectedBytes = 4;
+            } else if (
+                // These are always 4 bytes regardless of length field
+                (recvBuf[0] == 0x83 && recvBuf[1] == 0x68) ||  // manual announce
+                (recvBuf[1] == 0x56) ||                          // ACK
+                (recvBuf[1] == 0x09) ||                          // CTS
+                (recvBuf[1] == 0x92)                             // EOT
+            ) {
                 expectedBytes = 4;
             } else {
                 expectedBytes = 4 + dataLen + (dataLen > 0 ? 2 : 0);
@@ -309,52 +265,104 @@ void loop() {
             expectedBytes = 4;
             lenLo = 0;
 
+            uint8_t machineId = recvBuf[0];
+            uint8_t cmd       = recvBuf[1];
+
             switch (state) {
-                case WAIT_ANNOUNCE:
-                    Serial.println("Got announce, ACKing");
-                    sendShortPacket(0x56);
-                    state = WAIT_VAR_HDR;
-                    break;
-
-                case WAIT_VAR_HDR:
-                    recvVarType = recvBuf[6];  // type byte is at offset 6 (4 header + 2 data offset)
-                    Serial.println("Got VAR header, ACKing + sending CTS");
-                    sendShortPacket(0x56);
-                    delay(5);
-                    sendShortPacket(0x09);
-                    state = WAIT_ACK_TO_CTS;
-                    break;
-
-                case WAIT_ACK_TO_CTS:
-                    Serial.println("Got ACK to our CTS, waiting for data");
-                    state = WAIT_DATA;
+                case WAIT_PACKET:
+                    if (cmd == 0xC9) {
+                        // Calc sending us a variable via Send()
+                        // Just ACK, then wait for calc to send CTS
+                        Serial.println("Got RTS, ACKing, waiting for CTS from calc");
+                        recvVarType = recvBuf[6];
+                        sendShortPacket(0x56);  // ACK only — do NOT send CTS
+                        // stay in WAIT_PACKET, next packet should be CTS from calc
+                    } else if (cmd == 0x09) {
+                        // CTS from calc — ACK it and wait for data
+                        Serial.println("Got CTS from calc, ACKing, waiting for data");
+                        sendShortPacket(0x56);
+                        state = WAIT_DATA;
+                    } else if (cmd == 0xA2) {
+                        // REQ — calc requesting a variable from us
+                        Serial.println("Got REQ (calc wants Str1), sending it");
+                        sendShortPacket(0x56);  // ACK the REQ
+                        delay(5);
+                        // Send VAR header for Str1
+                        const char *response = "RESPONSE";
+                        uint16_t strLen = strlen(response);
+                        uint16_t dataSize = 2 + strLen;
+                        uint8_t header[11] = {0};
+                        header[0] = dataSize & 0xFF;
+                        header[1] = (dataSize >> 8) & 0xFF;
+                        header[2] = 0x04;   // string type
+                        header[3] = 0xAA;   // Str token
+                        header[4] = 0x00;   // Str1 is internally slot 0
+                        sendPacket(0x06, header, 11);
+                        delay(10);
+                        // Wait for ACK then CTS
+                        uint8_t r = recvShortPacket();
+                        Serial.print("ACK to header: 0x"); Serial.println(r, HEX);
+                        r = recvShortPacketWait();
+                        Serial.print("CTS: 0x"); Serial.println(r, HEX);
+                        // ACK the CTS
+                        sendShortPacket(0x56);
+                        delay(5);
+                        // Send data
+                        uint8_t payload[256];
+                        payload[0] = strLen & 0xFF;
+                        payload[1] = (strLen >> 8) & 0xFF;
+                        for (uint16_t i = 0; i < strLen; i++) payload[2 + i] = response[i];
+                        sendPacket(0x15, payload, dataSize);
+                        delay(10);
+                        // Wait for ACK
+                        r = recvShortPacketWait();
+                        Serial.print("ACK to data: 0x"); Serial.println(r, HEX);
+                        // Send EOT
+                        sendShortPacket(0x92);
+                        Serial.println("Str1 sent!");
+                    } else if (cmd == 0x68) {
+                        // Manual announce
+                        Serial.println("Got manual announce, ACKing");
+                        sendShortPacket(0x56);
+                        // stay in WAIT_PACKET, VAR header comes next
+                    } else if (cmd == 0x06) {
+                        // Manual VAR header
+                        Serial.println("Got VAR header, ACKing + CTS");
+                        recvVarType = recvBuf[6];
+                        sendShortPacket(0x56);
+                        delay(5);
+                        sendShortPacket(0x09);
+                        state = WAIT_DATA;
+                    } else {
+                        Serial.print("Unknown packet cmd: 0x");
+                        Serial.println(cmd, HEX);
+                    }
                     break;
 
                 case WAIT_DATA:
-                    Serial.println("Got DATA, ACKing");
-                    sendShortPacket(0x56);
-                    // Data bytes start at index 4 (after the 4-byte packet header)
-                    // First 2 bytes of data are the string length
-                    if (recvVarType == 0x04) {  // string
-                        uint16_t strLen = recvBuf[4] | (recvBuf[5] << 8);
-                        Serial.print("String value: ");
-                        for (uint16_t i = 0; i < strLen; i++) {
-                            Serial.print((char)recvBuf[6 + i]);
+                    if (cmd == 0x56) {
+                        // ACK to our CTS — data coming next, stay in WAIT_DATA
+                        Serial.println("Got ACK to CTS, data incoming");
+                    } else if (cmd == 0x15) {
+                        // DATA packet
+                        Serial.println("Got DATA, ACKing");
+                        sendShortPacket(0x56);
+                        if (recvVarType == 0x04) {
+                            uint16_t strLen = recvBuf[4] | (recvBuf[5] << 8);
+                            Serial.print("String value: ");
+                            for (uint16_t i = 0; i < strLen; i++) {
+                                Serial.print((char)recvBuf[6 + i]);
+                            }
+                            Serial.println();
                         }
-                        Serial.println();
+                        state = WAIT_EOT;
                     }
-                    state = WAIT_EOT;
                     break;
 
                 case WAIT_EOT:
-                    Serial.println("Got EOT, ACKing. Transfer complete!");
+                    Serial.println("Got EOT, ACKing. Receive complete!");
                     sendShortPacket(0x56);
-                    state = WAIT_ANNOUNCE;
-                    // Auto-respond with a string
-                    if (recvVarType == 0x04) {
-                        delay(500);  // brief pause before initiating send
-                        sendString("RESPONSE", 1);
-                    }
+                    state = WAIT_PACKET;
                     break;
             }
         }
@@ -363,7 +371,7 @@ void loop() {
     if (digitalRead(BOOT_PIN) == LOW) {
         delay(50);
         if (digitalRead(BOOT_PIN) == LOW) {
-            sendString("SUBSCRIBE", 1);  // sends "HELLO" to Str1
+            sendString("SUBSCRIBE", 1, false);
             while (digitalRead(BOOT_PIN) == LOW) delay(10);
         }
     }
