@@ -3,6 +3,8 @@
 #define RING 5
 #define TIMEOUT_RX_US 500
 #define TIMEOUT_TX_US 500000
+#define BOOT_PIN 9
+
 bool error_level;
 
 uint8_t getByte() {
@@ -95,12 +97,123 @@ void sendShortPacket(uint8_t cmd) {
     sendByte(0x00);
 }
 
+void sendPacket(uint8_t cmd, const uint8_t *data, uint16_t length) {
+    sendByte(0x73);
+    sendByte(cmd);
+    sendByte(length & 0xFF);
+    sendByte((length >> 8) & 0xFF);
+
+    uint16_t checksum = 0;
+    for (uint16_t i = 0; i < length; i++) {
+        sendByte(data[i]);
+        checksum += data[i];
+    }
+
+    if (length > 0) {
+        sendByte(checksum & 0xFF);
+        sendByte((checksum >> 8) & 0xFF);
+    }
+}
+
+uint8_t recvShortPacket() {
+    uint8_t b0 = getByte();
+    uint8_t b1 = getByte();
+    uint8_t b2 = getByte();
+    uint8_t b3 = getByte();
+    Serial.print("  recv: 0x"); Serial.print(b0, HEX);
+    Serial.print(" 0x"); Serial.print(b1, HEX);
+    Serial.print(" 0x"); Serial.print(b2, HEX);
+    Serial.print(" 0x"); Serial.println(b3, HEX);
+    return b1;
+}
+
+uint8_t recvShortPacketWait() {
+    // Wait up to 30 seconds for first byte (user is interacting with calc)
+    uint32_t start = millis();
+    while (digitalRead(TIP) && digitalRead(RING)) {
+        if (millis() - start > 30000) {
+            Serial.println("Timed out waiting for response");
+            return 0;
+        }
+    }
+    uint8_t b0 = getByte();
+    uint8_t b1 = getByte();
+    uint8_t b2 = getByte();
+    uint8_t b3 = getByte();
+    Serial.print("  recv: 0x"); Serial.print(b0, HEX);
+    Serial.print(" 0x"); Serial.print(b1, HEX);
+    Serial.print(" 0x"); Serial.print(b2, HEX);
+    Serial.print(" 0x"); Serial.println(b3, HEX);
+    return b1;
+}
+
+void sendVariable() {
+    Serial.println("\nSending variable to calculator...");
+    Serial.println("Put calc in receive mode: 2nd > LINK > RECEIVE, then press ENTER");
+    delay(5000);
+
+    const uint8_t varData[] = {
+    0x00, 0x83, 0x12, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00  // just the 9 float bytes
+    };
+    const uint16_t varDataSize = sizeof(varData);  // = 9
+
+    uint8_t header[13] = {
+        0x09, 0x00,
+        0x00,
+        'B', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00,
+        0x00
+    };
+
+    // Step 1: Send VAR header
+    Serial.println("Sending VAR header...");
+    sendPacket(0x06, header, 13);
+    delay(10);
+
+    // Step 2: Receive ACK
+    uint8_t cmd = recvShortPacket();
+    Serial.print("Step2 ACK: 0x"); Serial.println(cmd, HEX);
+    if (cmd != 0x56) { Serial.println("Expected ACK, aborting"); return; }
+
+    // Step 3: Receive CTS (calc may show overwrite screen here, wait for user)
+    cmd = recvShortPacketWait();
+    Serial.print("Step3 CTS: 0x"); Serial.println(cmd, HEX);
+    if (cmd != 0x09) { Serial.println("Expected CTS, aborting"); return; }
+
+    // Step 4: ACK the CTS
+    sendShortPacket(0x56);
+    delay(10);
+
+    // Step 5: Send DATA
+    Serial.println("Sending data...");
+    sendPacket(0x15, varData, varDataSize);
+    delay(10);
+
+    // Step 6: Receive ACK for data (wait — calc may be writing to memory)
+    cmd = recvShortPacketWait();
+    Serial.print("Step6 ACK: 0x"); Serial.println(cmd, HEX);
+    if (cmd != 0x56) { Serial.println("Expected ACK to data, aborting"); return; }
+
+    // Step 7: Send EOT
+    sendShortPacket(0x92);
+    delay(10);
+
+    // Step 8: Receive final ACK
+    cmd = recvShortPacketWait();
+    Serial.print("Step8 ACK: 0x"); Serial.println(cmd, HEX);
+
+    Serial.println("Done! Check your calculator.");
+}
+
 void setup() {
     Serial.begin(9600);
     delay(1500);
     pinMode(TIP, INPUT_PULLUP);
     pinMode(RING, INPUT_PULLUP);
-    Serial.println("Ready. Send a variable from the calculator.");
+    pinMode(BOOT_PIN, INPUT_PULLUP);
+    Serial.println("Ready.");
+    Serial.println("Press BOOT to send variable B=1234 to calculator.");
+    Serial.println("Or send a variable from calc to receive it here.");
 }
 
 void loop() {
@@ -166,6 +279,14 @@ void loop() {
                     state = WAIT_ANNOUNCE;
                     break;
             }
+        }
+    }
+
+    if (digitalRead(BOOT_PIN) == LOW) {
+        delay(50);
+        if (digitalRead(BOOT_PIN) == LOW) {
+            sendVariable();
+            while (digitalRead(BOOT_PIN) == LOW) delay(10);
         }
     }
 }
