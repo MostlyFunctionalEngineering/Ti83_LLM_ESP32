@@ -209,6 +209,63 @@ void sendVariable() {
     Serial.println("Done! Check your calculator.");
 }
 
+void sendString(const char *str, uint8_t strSlot) {
+    // strSlot: 0=Str0, 1=Str1, etc.
+    Serial.println("\nSending string to calculator...");
+    Serial.println("Put calc in receive mode: 2nd > LINK > RECEIVE, then press ENTER");
+    delay(5000);
+
+    uint16_t strLen = strlen(str);
+    uint16_t dataSize = 2 + strLen;  // 2-byte length prefix + string bytes
+
+    // Build data payload
+    uint8_t payload[256];
+    payload[0] = strLen & 0xFF;
+    payload[1] = (strLen >> 8) & 0xFF;
+    for (uint16_t i = 0; i < strLen; i++) {
+        payload[2 + i] = str[i];
+    }
+
+    // Build 13-byte header
+    uint8_t header[13] = {0};
+    header[0] = dataSize & 0xFF;
+    header[1] = (dataSize >> 8) & 0xFF;
+    header[2] = 0x04;         // type: string
+    header[3] = 0xAA;         // name byte 1 (Str token)
+    header[4] = strSlot;      // name byte 2 (slot number)
+
+    Serial.println("Sending VAR header...");
+    sendPacket(0x06, header, 13);
+    delay(10);
+
+    uint8_t cmd = recvShortPacket();
+    Serial.print("Step2 ACK: 0x"); Serial.println(cmd, HEX);
+    if (cmd != 0x56) { Serial.println("Expected ACK, aborting"); return; }
+
+    cmd = recvShortPacketWait();
+    Serial.print("Step3 CTS: 0x"); Serial.println(cmd, HEX);
+    if (cmd != 0x09) { Serial.println("Expected CTS, aborting"); return; }
+
+    sendShortPacket(0x56);
+    delay(10);
+
+    Serial.println("Sending data...");
+    sendPacket(0x15, payload, dataSize);
+    delay(10);
+
+    cmd = recvShortPacketWait();
+    Serial.print("Step6 ACK: 0x"); Serial.println(cmd, HEX);
+    if (cmd != 0x56) { Serial.println("Expected ACK to data, aborting"); return; }
+
+    sendShortPacket(0x92);
+    delay(10);
+
+    cmd = recvShortPacketWait();
+    Serial.print("Step8 ACK: 0x"); Serial.println(cmd, HEX);
+
+    Serial.println("Done!");
+}
+
 void setup() {
     Serial.begin(9600);
     delay(1500);
@@ -233,7 +290,6 @@ void loop() {
         if (data < 0x10) Serial.print("0");
         Serial.println(data, HEX);
         byteCount++;    
-        
 
         if (byteCount == 3) lenLo = data;
         if (byteCount == 4) {
@@ -294,6 +350,11 @@ void loop() {
                     Serial.println("Got EOT, ACKing. Transfer complete!");
                     sendShortPacket(0x56);
                     state = WAIT_ANNOUNCE;
+                    // Auto-respond with a string
+                    if (recvVarType == 0x04) {
+                        delay(500);  // brief pause before initiating send
+                        sendString("RESPONSE", 1);
+                    }
                     break;
             }
         }
@@ -302,7 +363,7 @@ void loop() {
     if (digitalRead(BOOT_PIN) == LOW) {
         delay(50);
         if (digitalRead(BOOT_PIN) == LOW) {
-            sendVariable();
+            sendString("SUBSCRIBE", 1);  // sends "HELLO" to Str1
             while (digitalRead(BOOT_PIN) == LOW) delay(10);
         }
     }
