@@ -105,7 +105,9 @@ void setup() {
 
 void loop() {
     static int byteCount = 0;
-    static int packetCount = 0;
+    static uint16_t expectedBytes = 4;
+    static uint8_t lenLo = 0;
+    static enum { WAIT_ANNOUNCE, WAIT_VAR_HDR, WAIT_ACK_TO_CTS, WAIT_DATA, WAIT_EOT } state = WAIT_ANNOUNCE;
 
     uint8_t data = getByte();
     if (!error_level) {
@@ -114,27 +116,55 @@ void loop() {
         Serial.println(data, HEX);
         byteCount++;
 
+        if (byteCount == 3) lenLo = data;
         if (byteCount == 4) {
-            packetCount++;
-            byteCount = 0;
-
-            if (packetCount == 1) {
-                // First packet is 0x83 0x68 announce — ACK it and move on
-                Serial.println("Got announce, ACKing");
-                sendShortPacket(0x56);
-                delay(5);
-            } else if (packetCount == 2) {
-                // Second packet is the real VAR header — ACK it then send CTS
-                Serial.println("Got VAR header, sending ACK + CTS");
-                sendShortPacket(0x56);  // ACK
-                delay(5);
-                sendShortPacket(0x09);  // CTS — we're ready for data
-                delay(5);
+            uint16_t dataLen = (uint16_t)lenLo | ((uint16_t)data << 8);
+            if (state == WAIT_ANNOUNCE) {
+                expectedBytes = 4; // announce is always 4 bytes
             } else {
-                // Subsequent packets — just ACK
-                Serial.println("ACK sent");
-                sendShortPacket(0x56);
-                delay(5);
+                expectedBytes = 4 + dataLen + (dataLen > 0 ? 2 : 0);
+            }
+            Serial.print("(expecting ");
+            Serial.print(expectedBytes);
+            Serial.println(" bytes total)");
+        }
+
+        if (byteCount == expectedBytes) {
+            byteCount = 0;
+            expectedBytes = 4;
+            lenLo = 0;
+
+            switch (state) {
+                case WAIT_ANNOUNCE:
+                    Serial.println("Got announce, ACKing");
+                    sendShortPacket(0x56);
+                    state = WAIT_VAR_HDR;
+                    break;
+
+                case WAIT_VAR_HDR:
+                    Serial.println("Got VAR header, ACKing + sending CTS");
+                    sendShortPacket(0x56);
+                    delay(5);
+                    sendShortPacket(0x09);
+                    state = WAIT_ACK_TO_CTS;
+                    break;
+
+                case WAIT_ACK_TO_CTS:
+                    Serial.println("Got ACK to our CTS, waiting for data");
+                    state = WAIT_DATA;
+                    break;
+
+                case WAIT_DATA:
+                    Serial.println("Got DATA, ACKing");
+                    sendShortPacket(0x56);
+                    state = WAIT_EOT;
+                    break;
+
+                case WAIT_EOT:
+                    Serial.println("Got EOT, ACKing. Transfer complete!");
+                    sendShortPacket(0x56);
+                    state = WAIT_ANNOUNCE; // reset for next transfer
+                    break;
             }
         }
     }
