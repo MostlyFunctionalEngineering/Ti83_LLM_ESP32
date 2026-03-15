@@ -5,6 +5,10 @@
 #define TIMEOUT_TX_US 500000
 #define BOOT_PIN 9
 
+uint8_t recvBuf[256];
+uint16_t recvBufLen = 0;
+uint8_t recvVarType = 0;
+
 bool error_level;
 
 uint8_t getByte() {
@@ -224,10 +228,12 @@ void loop() {
 
     uint8_t data = getByte();
     if (!error_level) {
+        recvBuf[byteCount] = data;  // save to buffer
         Serial.print("0x");
         if (data < 0x10) Serial.print("0");
         Serial.println(data, HEX);
-        byteCount++;
+        byteCount++;    
+        
 
         if (byteCount == 3) lenLo = data;
         if (byteCount == 4) {
@@ -255,6 +261,7 @@ void loop() {
                     break;
 
                 case WAIT_VAR_HDR:
+                    recvVarType = recvBuf[6];  // type byte is at offset 6 (4 header + 2 data offset)
                     Serial.println("Got VAR header, ACKing + sending CTS");
                     sendShortPacket(0x56);
                     delay(5);
@@ -270,6 +277,16 @@ void loop() {
                 case WAIT_DATA:
                     Serial.println("Got DATA, ACKing");
                     sendShortPacket(0x56);
+                    // Data bytes start at index 4 (after the 4-byte packet header)
+                    // First 2 bytes of data are the string length
+                    if (recvVarType == 0x04) {  // string
+                        uint16_t strLen = recvBuf[4] | (recvBuf[5] << 8);
+                        Serial.print("String value: ");
+                        for (uint16_t i = 0; i < strLen; i++) {
+                            Serial.print((char)recvBuf[6 + i]);
+                        }
+                        Serial.println();
+                    }
                     state = WAIT_EOT;
                     break;
 
