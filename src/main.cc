@@ -105,6 +105,7 @@ void setup() {
 
 void loop() {
     static int byteCount = 0;
+    static int packetCount = 0;
 
     uint8_t data = getByte();
     if (!error_level) {
@@ -114,10 +115,27 @@ void loop() {
         byteCount++;
 
         if (byteCount == 4) {
-            sendShortPacket(0x09);
-            Serial.println("ACK sent");
+            packetCount++;
             byteCount = 0;
-            delay(5);  // let lines settle before listening again
+
+            if (packetCount == 1) {
+                // First packet is 0x83 0x68 announce — ACK it and move on
+                Serial.println("Got announce, ACKing");
+                sendShortPacket(0x56);
+                delay(5);
+            } else if (packetCount == 2) {
+                // Second packet is the real VAR header — ACK it then send CTS
+                Serial.println("Got VAR header, sending ACK + CTS");
+                sendShortPacket(0x56);  // ACK
+                delay(5);
+                sendShortPacket(0x09);  // CTS — we're ready for data
+                delay(5);
+            } else {
+                // Subsequent packets — just ACK
+                Serial.println("ACK sent");
+                sendShortPacket(0x56);
+                delay(5);
+            }
         }
     }
 }
