@@ -1,8 +1,13 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <WiFiManager.h>        // tzapu/WiFiManager — captive portal setup
+#include <Preferences.h>        // ESP32 NVS for storing API key
 #include <ArduinoJson.h>
-#include "secrets.h"
+
+// API key is stored in NVS via WiFiManager custom parameter.
+// No secrets.h needed — configured via captive portal on first boot.
+char CLAUDE_API_KEY[128] = {0};
 
 #define TIP 6
 #define RING 5
@@ -23,9 +28,15 @@ uint16_t recvBufLen = 0;
 uint8_t recvVarType = 0;
 bool pendingSendProgram = false;
 bool pendingRemoteSend = false;
+bool pendingWifiPortal = false;
 char lastQuery[256] = {0};
 
 bool error_level;
+
+// WiFiManager globals — must be global to avoid stack overflow on ESP32-C3
+// and to allow reuse in the WIFI portal handler during runtime.
+WiFiManager wm;
+WiFiManagerParameter apiKeyParam("apikey", "Anthropic API Key", CLAUDE_API_KEY, 127);
 
 // TIGPT BASIC program:
 //   ClrHome
@@ -645,18 +656,88 @@ void setup() {
     pinMode(RING, INPUT_PULLUP);
     pinMode(BOOT_PIN, INPUT_PULLUP);
 
-    Serial.print("Connecting to WiFi");
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
+    // Load saved API key from NVS (readonly mode to suppress NOT_FOUND errors)
+    {
+        Preferences prefs;
+        prefs.begin("tigpt", true);  // true = read-only
+        if (prefs.isKey("apikey")) {
+            String savedKey = prefs.getString("apikey", "");
+            strncpy(CLAUDE_API_KEY, savedKey.c_str(), sizeof(CLAUDE_API_KEY) - 1);
+            Serial.println("Loaded API key from NVS.");
+        } else {
+            Serial.println("No API key in NVS yet (first boot).");
+        }
+        prefs.end();
     }
-    Serial.println();
+    // Update the global apiKeyParam with the loaded key so portal shows it pre-filled
+    // We do this by re-setting the value via a new param — WiFiManagerParameter
+    // doesn't have a setValue(), so we just rely on CLAUDE_API_KEY being set correctly
+    // and pass it as the default when the portal opens. The global was initialized
+    // with the empty array; the portal will show whatever CLAUDE_API_KEY holds at open time.
+
+    // WiFiManager setup — captive portal for WiFi + API key config
+    // wm and apiKeyParam are global to avoid stack overflow on ESP32-C3
+    wm.addParameter(&apiKeyParam);
+
+    // Save API key callback — fires after successful connection
+    wm.setSaveParamsCallback([&]() {
+        strncpy(CLAUDE_API_KEY, apiKeyParam.getValue(), sizeof(CLAUDE_API_KEY) - 1);
+        Preferences p;
+        p.begin("tigpt", false);
+        p.putString("apikey", CLAUDE_API_KEY);
+        p.end();
+        Serial.println("API key saved to NVS.");
+    });
+
+    // Auto-connect: tries saved WiFi, launches portal as "Ti83-Plus" if it fails
+    // To reconfigure: send the string "WIFI" from the calculator via 2ND LINK SEND
+    Serial.println("Connecting to WiFi...");
+    wm.setConfigPortalTimeout(180);  // 3 min timeout then reboot
+    if (!wm.autoConnect("Ti83-Plus")) {
+        Serial.println("WiFi connect failed, rebooting...");
+        ESP.restart();
+    }
+
+    // Re-read API key after portal (in case it was just set)
+    strncpy(CLAUDE_API_KEY, apiKeyParam.getValue(), sizeof(CLAUDE_API_KEY) - 1);
+    if (strlen(CLAUDE_API_KEY) == 0) {
+        // Try loading from NVS again
+        Preferences p2;
+        p2.begin("tigpt", true);
+        String k = p2.getString("apikey", "");
+        p2.end();
+        strncpy(CLAUDE_API_KEY, k.c_str(), sizeof(CLAUDE_API_KEY) - 1);
+    }
+
+    // If API key still not set, force the config portal now
+    if (strlen(CLAUDE_API_KEY) == 0) {
+        Serial.println("========================================");
+        Serial.println("NO API KEY SET — LAUNCHING SETUP PORTAL");
+        Serial.println("Connect phone to WiFi: Ti83-Plus");
+        Serial.println("Then open: http://192.168.4.1");
+        Serial.println("Enter your Anthropic API key and save.");
+        Serial.println("========================================");
+        wm.startConfigPortal("Ti83-Plus");
+        strncpy(CLAUDE_API_KEY, apiKeyParam.getValue(), sizeof(CLAUDE_API_KEY) - 1);
+        // Save whatever was entered
+        if (strlen(CLAUDE_API_KEY) > 0) {
+            Preferences p3;
+            p3.begin("tigpt", false);
+            p3.putString("apikey", CLAUDE_API_KEY);
+            p3.end();
+            Serial.println("API key saved.");
+        }
+    }
+
     Serial.print("Connected! IP: ");
     Serial.println(WiFi.localIP());
-    Serial.println("Ready.");
+    if (strlen(CLAUDE_API_KEY) == 0) {
+        Serial.println("WARNING: No API key set. Send WIFI from calc to configure.");
+    } else {
+        Serial.println("API key loaded. Ready.");
+    }
     Serial.println("Send A=69 from calc to install TIGPT program.");
-    Serial.println("After typing query in TIGPT, press BOOT to send Str0 to ESP32.");
+    Serial.println("Send string \"WIFI\" from calc to reconfigure WiFi/API key.");
 }
 
 void loop() {
@@ -801,7 +882,17 @@ void loop() {
                                     for (uint16_t i = 0; i < dlen + 2 && i < sizeof(sd); i++) sd[i] = getByte();
                                     uint16_t qLen = sd[0] | (sd[1] << 8);
                                     for (uint16_t i = 0; i < qLen && i < 255; i++) {
-                                        lastQuery[i] = (sd[2 + i] == 0x29) ? ' ' : sd[2 + i];
+                                        uint8_t b = sd[2 + i];
+                                        if (b == 0x29) lastQuery[i] = ' ';
+                                        else if (b == 0x3A) lastQuery[i] = '.';
+                                        else if (b == 0x83) lastQuery[i] = '/';
+                                        else if (b == 0x70) lastQuery[i] = '+';
+                                        else if (b == 0x10) lastQuery[i] = '(';
+                                        else if (b == 0x11) lastQuery[i] = ')';
+                                        else if (b == 0x6A) lastQuery[i] = '=';
+                                        else if (b == 0x6C) lastQuery[i] = '>';
+                                        else if (b == 0x6B) lastQuery[i] = '<';
+                                        else lastQuery[i] = b;
                                     }
                                     Serial.print("Str0 query: "); Serial.println(lastQuery);
                                     sendShortPacket03(0x56);  // ACK DATA
@@ -909,14 +1000,26 @@ void loop() {
                             uint16_t strLen = recvBuf[4] | (recvBuf[5] << 8);
                             memset(lastQuery, 0, sizeof(lastQuery));
                             for (uint16_t i = 0; i < strLen && i < 255; i++) {
-                                // 0x29 is TI space token, convert to ASCII space
-                                lastQuery[i] = (recvBuf[6 + i] == 0x29) ? ' ' : recvBuf[6 + i];
+                                uint8_t b = recvBuf[6 + i];
+                                if (b == 0x29) lastQuery[i] = ' ';
+                                else if (b == 0x3A) lastQuery[i] = '.';
+                                else if (b == 0x83) lastQuery[i] = '/';
+                                else if (b == 0x70) lastQuery[i] = '+';
+                                else if (b == 0x10) lastQuery[i] = '(';
+                                else if (b == 0x11) lastQuery[i] = ')';
+                                else if (b == 0x6A) lastQuery[i] = '=';
+                                else if (b == 0x6C) lastQuery[i] = '>';
+                                else if (b == 0x6B) lastQuery[i] = '<';
+                                else lastQuery[i] = b;
                             }
                             Serial.print("Query received: ");
                             Serial.println(lastQuery);
                             if (strcmp(lastQuery, "69") == 0) {
                                 Serial.println("Magic string! Will send program after EOT.");
                                 pendingSendProgram = true;
+                            } else if (strcmp(lastQuery, "WIFI") == 0) {
+                                Serial.println("WIFI magic string — will launch config portal after EOT.");
+                                pendingWifiPortal = true;
                             }
                         }
                         if (recvVarType == 0x00) {
@@ -942,6 +1045,20 @@ void loop() {
                     if (pendingSendProgram) {
                         pendingSendProgram = false;
                         sendProgram();
+                    } else if (pendingWifiPortal) {
+                        pendingWifiPortal = false;
+                        Serial.println("Launching WiFi config portal...");
+                        wm.setConfigPortalTimeout(180);
+                        wm.startConfigPortal("Ti83-Plus");
+                        strncpy(CLAUDE_API_KEY, apiKeyParam.getValue(), sizeof(CLAUDE_API_KEY) - 1);
+                        if (strlen(CLAUDE_API_KEY) > 0) {
+                            Preferences p;
+                            p.begin("tigpt", false);
+                            p.putString("apikey", CLAUDE_API_KEY);
+                            p.end();
+                            Serial.println("API key saved.");
+                        }
+                        Serial.println("Portal done, resuming.");
                     } else if (pendingRemoteSend) {
                         pendingRemoteSend = false;
                         delay(300);
