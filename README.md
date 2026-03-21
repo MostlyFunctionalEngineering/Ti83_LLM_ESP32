@@ -25,18 +25,20 @@ You send your question, and it sends back an AI answer!
 ## Hardware
 
 - Seeed XIAO ESP32-C3
-- TI-83 Plus (the silver one, not the SE — haven't tested others)
+- TI-83 Plus (Not the SE — haven't tested others)
 - 4 wires
-- Some way to power the ESP32 (I tapped the calc's battery rails)
+- A multimeter to not screw things up
 
 **Wiring:**
+
+There are two giant pads on the back of the PCB where the battery pack springs touch. I soldered the 5V and GND connections to these. Then, there is the little 2.5mm port on the bottom of the PCB. The tip and ring are what we want. The tip is the one on the top, then the ring is the one on the left side (if viewing the PCB from the back). I HIGHLY RECOMMEND USING A MULTIMETER FOR THIS.  
 
 | ESP32-C3 pin | Link port |
 |---|---|
 | GPIO 6 | TIP (sleeve closest to tip) |
 | GPIO 5 | RING (middle sleeve) |
-| GND | GND (base sleeve) |
-| VUSB | (5V power from the batterises) |
+| GND | GND (Solder this to the big - pad) |
+| VUSB | (5V power from the batterises, solder this to the big + pad) |
 
 The link port is 3.3V logic so it plays nice with the ESP32 directly. I think there are some 3.3V pins on the back of the PCB too, so those would be probably better than grabbing the batter voltage directly. 
 
