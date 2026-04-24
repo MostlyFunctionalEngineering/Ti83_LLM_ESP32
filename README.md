@@ -31,16 +31,16 @@ You send your question, and it sends back an AI answer!
 
 **Wiring:**
 
-There are two giant pads on the back of the PCB where the battery pack springs touch. I soldered the 5V and GND connections to these. Then, there is the little 2.5mm port on the bottom of the PCB. The tip and ring are what we want. The tip is the one on the top, then the ring is the one on the left side (if viewing the PCB from the back). I HIGHLY RECOMMEND USING A MULTIMETER FOR THIS.  
+There are 3.3V pads on the back of the calculator PCB — use those for power rather than tapping the battery rails directly. It's cleaner and already regulated. Then, there is the little 2.5mm port on the bottom of the PCB. The tip and ring are what we want. The tip is the one on the top, then the ring is the one on the left side (if viewing the PCB from the back). I HIGHLY RECOMMEND USING A MULTIMETER FOR THIS.
 
-| ESP32-C3 pin | Link port |
+| ESP32-C3 pin | Where to solder |
 |---|---|
 | GPIO 6 | TIP (sleeve closest to tip) |
 | GPIO 5 | RING (middle sleeve) |
-| GND | GND (Solder this to the big - pad) |
-| VUSB | (5V power from the batterises, solder this to the big + pad) |
+| GND | GND pad on calculator PCB |
+| 3V3 | 3.3V pad on calculator PCB |
 
-The link port is 3.3V logic so it plays nice with the ESP32 directly. I think there are some 3.3V pins on the back of the PCB too, so those would be probably better than grabbing the batter voltage directly. 
+The link port is 3.3V logic so it plays nice with the ESP32 directly. I tried using the 5V directly from the battery pads, but it made the calculator brown out. Be warned!
 
 ---
 
@@ -151,4 +151,4 @@ README.md           — this file
 
 ## License
 
-Do whatever you want with this, idc it's mostly non-functional anyways. 
+Do whatever you want with this, idc it's mostly non-functional anyways.

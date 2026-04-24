@@ -711,15 +711,21 @@ void setup() {
         ESP.restart();
     }
 
-    // Re-read API key after portal (in case it was just set)
-    strncpy(CLAUDE_API_KEY, apiKeyParam.getValue(), sizeof(CLAUDE_API_KEY) - 1);
-    if (strlen(CLAUDE_API_KEY) == 0) {
-        // Try loading from NVS again
-        Preferences p2;
-        p2.begin("tigpt", true);
-        String k = p2.getString("apikey", "");
-        p2.end();
-        strncpy(CLAUDE_API_KEY, k.c_str(), sizeof(CLAUDE_API_KEY) - 1);
+    // Re-read API key from portal only if it was actually filled in.
+    // apiKeyParam was constructed before NVS was read, so getValue() returns
+    // empty on normal boots even if NVS has a valid key. Don't overwrite.
+    {
+        const char *portalVal = apiKeyParam.getValue();
+        if (portalVal && strlen(portalVal) > 0) {
+            strncpy(CLAUDE_API_KEY, portalVal, sizeof(CLAUDE_API_KEY) - 1);
+            // Save it — portal callback may not have fired on autoConnect
+            Preferences p2;
+            p2.begin("tigpt", false);
+            p2.putString("apikey", CLAUDE_API_KEY);
+            p2.end();
+            Serial.println("API key saved from portal value.");
+        }
+        // If portal was empty, CLAUDE_API_KEY already has the NVS value from earlier
     }
 
     // If API key still not set, force the config portal now
